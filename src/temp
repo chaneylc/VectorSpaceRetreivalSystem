@@ -1,0 +1,153 @@
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.HashSet;
+import java.util.List;
+import java.util.StringTokenizer;
+import java.io.IOException;
+import java.util.HashMap;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.Mapper;
+import org.apache.hadoop.mapreduce.Reducer;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+
+/**
+ * Created by chaneylc on 9/25/15.
+ */
+public class InputPreprocessor {
+    public static class TokenizerMapper
+            extends Mapper<Object, Text, IntWritable, Text>{
+
+        private Text word = new Text();
+        private HashMap<Text, IntWritable> S;
+
+        protected void setup(Context context) {
+            S = new HashMap<Text, IntWritable>();
+        }
+
+        public void map(Object key, Text value, Context context
+        ) throws IOException, InterruptedException {
+            StringTokenizer itr = new StringTokenizer(value.toString());
+            while (itr.hasMoreTokens()) {
+                word.set(itr.nextToken());
+                Text t = new Text(word.toString());
+                S.put(t, S.containsKey(t) ? new IntWritable(S.get(t).get() + 1) : new IntWritable(1));
+            }
+        }
+
+        protected void cleanup(Context context
+        ) throws IOException, InterruptedException {
+            for(Text sumKey : S.keySet()) {
+                context.write(S.get(sumKey), sumKey);
+            }
+        }
+    }
+
+    public static class IntSumReducer
+            extends Reducer<IntWritable,Text,Text,IntWritable> {
+
+        public void reduce(IntWritable key, Iterable<Text> values,
+                           Context context
+        ) throws IOException, InterruptedException {
+            for (Text val : values) {
+                context.write(val, key);
+            }
+        }
+    }
+
+    public static void main(String[] args) throws IOException {
+
+        Configuration conf = new Configuration();
+        FileSystem fs = FileSystem.get(conf);
+
+        Path input = new Path(args[0]);
+        Path output = new Path(args[1]);
+
+        if(!fs.exists(input))
+            System.err.println("Error reading input path" + input);
+        if(fs.exists(output))
+            fs.delete(output, true); //delete output folder before next Hadoop instance runs
+        if(fs.exists(new Path("./clean_input.txt"))) {
+            fs.delete(new Path("./clean_input.txt"), true);
+        }
+        if(Files.exists(Paths.get("./clean_input.txt"))) {
+            Files.delete(Paths.get("./clean_input.txt"));
+        }
+
+        InputPreprocessor.main(new String[] {"/Users/chaneylc/IdeaProjects/Hadoop/input/stopwords_smaller_list.txt", input.toString()});
+
+        assert(Files.exists(Paths.get("clean_input.txt")));
+        Path cleanInput = new Path("./clean_input.txt");
+
+        Job job = Job.getInstance(conf, "VSRS");
+        job.setJarByClass(VectorSpaceRetrievalSystem.class);
+        job.setMapperClass(TokenizerMapper.class);
+        job.setReducerClass(IntSumReducer.class);
+        job.setOutputKeyClass(IntWritable.class);
+        job.setOutputValueClass(Text.class);
+
+        FileInputFormat.addInputPath(job, cleanInput);
+        FileOutputFormat.setOutputPath(job, output);
+
+
+        int result = job.waitForCompletion(true) ? 0 : 1;
+
+        fs.delete(cleanInput, true);
+
+        System.exit(result);
+
+        //delete output folder if already exists
+        if(Files.exists(Paths.get(args[2]))) {
+            Files.delete(Paths.get(args[2]));
+        }
+
+        Posting posting = new Posting();
+        HashSet<String> stopTable = new HashSet<String>();
+        List<String> stopWordsList = Files.readAllLines(Paths.get(args[0]));
+        List<String> lines = Files.readAllLines(Paths.get(args[1]));
+        HashSet<String> tokens = new HashSet<String>();
+
+        for(String stopWord: stopWordsList)
+            stopTable.add(stopWord);
+
+        for(String l : lines) {
+            String noHTMLString = l.replaceAll("(\\<.*?\\>)", "");
+            StringTokenizer getId = new StringTokenizer(noHTMLString, " ");
+            getId.nextToken(); //kill cranfield
+            int docID = Integer.parseInt(getId.nextToken());
+
+            StringBuilder noCranfieldNoDocId = new StringBuilder();
+            while (getId.hasMoreTokens())
+                noCranfieldNoDocId.append(getId.nextToken() + "\t");
+
+            StringTokenizer st = new StringTokenizer(noCranfieldNoDocId.toString(), " :\t\n0123456789.,\\/'~`!?!@#$%^&*()_+-=");
+
+            while (st.hasMoreElements()) {
+                String next = st.nextToken().toLowerCase().trim();
+                /**
+                 * I noticed that some of the stemmed output still had words like: 'ae', 'ce', 'z'
+                 * so I limit the words to more than 2 characters
+                 */
+                if (!stopTable.contains(next) && next.length() > 2) {
+                    /**
+                     * naively use new Stemmer for each word, probably unnecessary
+                     */
+                    Stemmer stemmer = new Stemmer(); //Porter stemmer implementation
+                    stemmer.add(next.toCharArray(), next.length());
+                    stemmer.stem();
+                    posting.post(stemmer.toString(), docID);
+                }
+            }
+        }
+        System.out.println(posting.toString());
+        posting.writeToFile(args[2]);
+    }
+}
+

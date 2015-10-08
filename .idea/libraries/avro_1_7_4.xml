@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="avro-1.7.4">
+    <CLASSES>
+      <root url="jar://$USER_HOME$/hadoop-2.7.1/share/hadoop/tools/lib/avro-1.7.4.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
