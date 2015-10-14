@@ -23,31 +23,25 @@ import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
  */
 public class InputPreprocessor {
 
-    private HashSet<Integer> N;
-
-    public static class SGMLTokenizerMapper extends Mapper<Object, Text, Text, Text>{
-
-        private Posting P;
-
-        protected void setup(Context context) {
-            this.P = new Posting();
-        }
+    public static class TokensMapper extends Mapper<Object,Text,IntWritable,Text> {
 
         public void map(Object key, Text value, Context context
         ) throws IOException, InterruptedException {
 
             Configuration conf = context.getConfiguration();
 
-            //replace all SGML tag components, maybe a seperate map reduce job would make this more efficient.
-            StringTokenizer getId = new StringTokenizer(value.toString().replaceAll("(\\<.*?\\>)", ""), " ");
-            getId.nextToken(); //kill cranfield
-            //output for this map will emit (docid, List<String>) where the Strings have no SGML components but have not been tokenized
-            int docid = Integer.parseInt(getId.nextToken());
+            //replace all SGML tag components, maybe a separate MR job specific for REs would make this more efficient.
+            StringTokenizer st = new StringTokenizer(value.toString().replaceAll("(\\<.*?\\>)", ""), " ");
+            st.nextToken(); //kill cranfield
+
+            int docid = Integer.parseInt(st.nextToken());
 
             StringBuilder noCranfieldNoDocId = new StringBuilder();
-            while (getId.hasMoreTokens()) noCranfieldNoDocId.append(getId.nextToken() + " ");
+            while (st.hasMoreTokens()) noCranfieldNoDocId.append(st.nextToken() + " ");
 
-            StringTokenizer st = new StringTokenizer(noCranfieldNoDocId.toString(), " :\t\n0123456789.,\\/'~`!?!@#$%^&*()_+-=");
+            st = new StringTokenizer(noCranfieldNoDocId.toString(), " :\t\n0123456789.,\\/'~`!?!@#$%^&*()_+-=");
+
+            Stemmer stemmer = new Stemmer(); //Porter stemmer implementation
 
             while (st.hasMoreElements()) {
                 String next = st.nextToken().toLowerCase().trim();
@@ -57,50 +51,74 @@ public class InputPreprocessor {
                  */
                 if ((conf.get(next) == null) && next.length() > 2) {
                     /**
-                     * naively use new Stemmer for each word,
-                     * probably unnecessary and very inefficient for map reduce jobs
-                     * Maybe there is a distributed implementation of stemming?
+                     * calling Porter may be inefficient for map reduce jobs;
+                     * The implementation seems very efficient but,
+                     * maybe there is a distributed implementation of stemming.
                      */
-                    Stemmer stemmer = new Stemmer(); //Porter stemmer implementation
                     stemmer.add(next.toCharArray(), next.length());
                     stemmer.stem();
-                    String stemmedWord = stemmer.toString();
-                    this.P.post(stemmedWord, docid);
-                    //context.write(new IntWritable(docid), new Text(stemmedWord));
-                }
-            }
-        }
 
-        protected void cleanup(Context context) throws IOException, InterruptedException {
-            //System.out.println(this.posting.toString());
-            for(String term : this.P.posting.keySet()) {
-                HashMap<Integer, Integer> docFreqs = this.P.posting.get(term).getValue();
-                for(Integer docid : docFreqs.keySet())
-                    context.write(new Text(term), new Text(docid + " " + docFreqs.get(docid).toString()));
+                    context.write(new IntWritable(docid), new Text(stemmer.toString()));
+                }
             }
         }
     }
 
-    public static class RawInputReducer extends Reducer<Text,Text,Text,Text> {
+    public static class PostingReducer extends Reducer<IntWritable,Text,Text,Text> {
 
-        private HashSet<Integer> N;
+        private Posting P;
+        private HashSet<IntWritable> N;
+
+        protected void setup(Context ctx) {
+            this.P = new Posting();
+            this.N = new HashSet<IntWritable>();
+        }
+
+        public void reduce(IntWritable docid, Iterable<Text> stemmedWords, Context ctx) throws IOException, InterruptedException {
+            for(Text term : stemmedWords)
+                this.P.post(term.toString(), docid.get());
+            this.N.add(docid);
+        }
+
+        /**
+         * Cleanup will emit terms as Text keys and posting lists as Text values
+         */
+        protected void cleanup(Context context) throws IOException, InterruptedException {
+            context.getCounter("N", "N").increment(N.size());
+            for(String term : this.P.posting.keySet()) {
+                StringBuilder sb = new StringBuilder();
+                final HashMap<Integer, Integer> docFreqs = this.P.posting.get(term).getValue();
+                for(Integer docid : docFreqs.keySet())
+                    sb.append(docid + " " + docFreqs.get(docid).toString() + " ");
+                context.write(new Text(term), new Text(sb.toString()));
+            }
+        }
+    }
+
+    public static class IdentityMapper extends Mapper<Object,Text,Text,Text> {
+        public void map(Object key, Text value, Context ctx) throws IOException, InterruptedException {
+            StringTokenizer st = new StringTokenizer(value.toString(), "\t");
+            ctx.write(new Text(st.nextToken()), new Text(st.nextToken()));
+        }
+    }
+
+    public static class FrequencyReducer extends Reducer<Text,Text,Text,Text> {
+
         private HashMap<Integer, Integer> maxFrequencies;
         private HashMap<String, Pair<Integer, Text>> encodedPosting;
 
         protected void setup(Context ctx) {
-            this.N = new HashSet<Integer>();
             this.maxFrequencies = new HashMap<Integer, Integer>();
             this.encodedPosting = new HashMap<String, Pair<Integer, Text>>();
         }
 
         public void reduce(Text key, Iterable<Text> values, Context ctx) throws IOException, InterruptedException {
 
-            Configuration conf = ctx.getConfiguration();
-            StringBuilder sb = new StringBuilder();
             int localDocCount = 0;
-            for(Text term : values) {
+            String list = values.iterator().next().toString();
+            StringTokenizer st = new StringTokenizer(list, " ");
+            while(st.hasMoreTokens()) {
                 localDocCount++;
-                StringTokenizer st = new StringTokenizer(term.toString(), " ");
                 Integer docid = Integer.parseInt(st.nextToken());
                 Integer f = Integer.parseInt(st.nextToken());
                 if(this.maxFrequencies.containsKey(docid)) {
@@ -109,15 +127,11 @@ public class InputPreprocessor {
                 } else {
                     this.maxFrequencies.put(docid, f);
                 }
-                N.add(docid);
-                sb.append(' ');
-                sb.append(term);
             }
-            this.encodedPosting.put(key.toString(), new Pair<Integer, Text>(localDocCount, new Text(sb.toString())));
+            this.encodedPosting.put(key.toString(), new Pair<Integer, Text>(localDocCount, new Text(list)));
         }
 
         protected void cleanup(Context ctx) throws IOException, InterruptedException {
-            ctx.getCounter("N", "N").increment(N.size());
             for(String term : this.encodedPosting.keySet()) {
                 Pair<Integer, Text> post = this.encodedPosting.get(term);
                 StringTokenizer st = new StringTokenizer(post.getValue().toString(), " ");
@@ -138,7 +152,7 @@ public class InputPreprocessor {
         }
     }
 
-    public static class PostingTokenizerMapper extends Mapper<Object, Text, IntWritable, DoubleWritable> {
+    public static class WeightMapper extends Mapper<Object,Text,IntWritable,DoubleWritable> {
 
         private Long N;
 
@@ -164,7 +178,7 @@ public class InputPreprocessor {
         }
     }
 
-    public static class WeightAggregatorReducer extends Reducer<IntWritable,DoubleWritable,IntWritable,Text> {
+    public static class WeightSumReducer extends Reducer<IntWritable,DoubleWritable,IntWritable,Text> {
 
         public void reduce(IntWritable key, Iterable<DoubleWritable> tfs, Context ctx) throws IOException, InterruptedException {
             Double sum = 0.0;
@@ -188,6 +202,7 @@ public class InputPreprocessor {
         Path preInput = new Path(args[1]);
         Path preOutput = new Path(args[2]);
         Path postOutput = new Path(args[3]);
+        Path freqOutput = new Path(args[4]);
         /** delete output folder if it alrady exists **/
 
         if(!fs.exists(preInput) || !fs.exists(stopWords))
@@ -196,6 +211,8 @@ public class InputPreprocessor {
             fs.delete(preOutput, true); //delete output folder before next Hadoop instance runs
         if(fs.exists(postOutput))
             fs.delete(postOutput, true);
+        if(fs.exists(freqOutput))
+            fs.delete(freqOutput, true);
 
         /**
          * pre-pre processing ;)
@@ -208,8 +225,11 @@ public class InputPreprocessor {
 
         Job preprocessJob = Job.getInstance(conf, "SGML Raw Input Preprocessor");
         preprocessJob.setJarByClass(VectorSpaceRetrievalSystem.class);
-        preprocessJob.setMapperClass(SGMLTokenizerMapper.class);
-        preprocessJob.setReducerClass(RawInputReducer.class);
+        preprocessJob.setMapperClass(TokensMapper.class);
+        preprocessJob.setReducerClass(PostingReducer.class);
+        preprocessJob.setNumReduceTasks(1);
+        preprocessJob.setMapOutputKeyClass(IntWritable.class);
+        preprocessJob.setMapOutputValueClass(Text.class);
         preprocessJob.setOutputKeyClass(Text.class);
         preprocessJob.setOutputValueClass(Text.class);
 
@@ -226,14 +246,37 @@ public class InputPreprocessor {
         Long n = preprocessJob.getCounters().findCounter("N", "N").getValue();
         conf.set("N", n.toString());
 
+        Job freqJob = Job.getInstance(conf, "Calculate Frequencies");
+        freqJob.setJarByClass(VectorSpaceRetrievalSystem.class);
+        freqJob.setMapperClass(IdentityMapper.class);
+        freqJob.setReducerClass(FrequencyReducer.class);
+        freqJob.setNumReduceTasks(1);
+        freqJob.setMapOutputKeyClass(Text.class);
+        freqJob.setMapOutputValueClass(Text.class);
+        freqJob.setOutputKeyClass(Text.class);
+        freqJob.setOutputValueClass(Text.class);
+
+        FileInputFormat.addInputPath(freqJob, preOutput);
+        FileOutputFormat.setOutputPath(freqJob, freqOutput);
+
+        int freqResult = freqJob.waitForCompletion(true) ? 0 : 1;
+
+        if(freqResult == 1) {
+            System.err.println("Something went wrong in the frequency calculating MapReduce job.");
+            System.exit(preResult);
+        }
+
         Job weightJob = Job.getInstance(conf, "Aggregate Weights");
         weightJob.setJarByClass(VectorSpaceRetrievalSystem.class);
-        weightJob.setMapperClass(PostingTokenizerMapper.class);
-        weightJob.setReducerClass(WeightAggregatorReducer.class);
+        weightJob.setMapperClass(WeightMapper.class);
+        weightJob.setReducerClass(WeightSumReducer.class);
+        weightJob.setNumReduceTasks(1);
+        weightJob.setMapOutputKeyClass(IntWritable.class);
+        weightJob.setMapOutputValueClass(DoubleWritable.class);
         weightJob.setOutputKeyClass(IntWritable.class);
-        weightJob.setOutputValueClass(DoubleWritable.class);
+        weightJob.setOutputValueClass(Text.class);
 
-        FileInputFormat.addInputPath(weightJob, preOutput);
+        FileInputFormat.addInputPath(weightJob, freqOutput);
         FileOutputFormat.setOutputPath(weightJob, postOutput);
 
         int postResult = weightJob.waitForCompletion(true) ? 0 : 1;

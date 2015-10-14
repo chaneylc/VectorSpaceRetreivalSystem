@@ -17,9 +17,9 @@ public class VectorSpaceRetrievalSystem {
             System.exit(1);
         }
         //else
-        List<String> rawPosting = Files.readAllLines(Paths.get("/Users/chaneylc/IdeaProjects/Hadoop/output/part-r-00000"));
-        List<String> documentLengths = Files.readAllLines(Paths.get("/Users/chaneylc/IdeaProjects/Hadoop/postOutput/part-r-00000"));
-        List<String> stopWords = Files.readAllLines(Paths.get("/Users/chaneylc/IdeaProjects/Hadoop/input/stopwords_smaller_list.txt"));
+        List<String> rawPosting = Files.readAllLines(Paths.get(args[1]));
+        List<String> documentLengths = Files.readAllLines(Paths.get(args[2]));
+        List<String> stopWords = Files.readAllLines(Paths.get(args[3]));
 
         /**
          * read document weight vector and vector length from file
@@ -71,9 +71,6 @@ public class VectorSpaceRetrievalSystem {
             if(posting.containsKey(s)) {
                 String p = posting.get(s);
                 Integer qdf = calculateDf(p);
-                /**
-                 * should not be size of uniqTerms
-                 */
                 Double qidf = (Math.log10(N / qdf) / Math.log10(2));
                 Double w = (occurrences / qmaxF) * qidf;
                 StringTokenizer st = new StringTokenizer(p, "\t ");
